@@ -1,0 +1,210 @@
+                                   ┌──────────────────────────┐
+                                   │         Internet         │
+                                   │  (public users, peers)   │
+                                   └────────────┬─────────────┘
+                                                │
+                                           [WAN: igb1]
+                                                │
+╔════════════════════════════════════════════════════════════════════════════════════╗
+║                                 OPNsense (bare metal)                               ║
+║------------------------------------------------------------------------------------║
+║  Gateways / Trust Boundaries                                                        ║
+║                                                                                    ║
+║   LAN       192.168.1.1        Admin-only human access                              ║
+║   CORE10    10.10.0.1          Highest-trust infra hosts                            ║
+║   TRUST     10.20.0.1          Trusted Wi-Fi clients                                ║
+║   GUEST     10.30.0.1          Guest Wi-Fi (internet only)                          ║
+║   CORE_SVC  10.40.0.1          K8s Service VIP address space (MetalLB)              ║
+║   IoT       10.60.0.1          IoT devices (low trust)                              ║
+║   IPMI      10.98.0.1          Out-of-band BMC mgmt (very restricted)               ║
+║   AP_MGMT   10.99.0.1          AP management network (attack surface)               ║
+║   WG_CORE   10.10.200.1        WireGuard overlay (control-plane only)               ║
+║                                                                                    ║
+║  Core services running on OPNsense                                                  ║
+║   • Unbound DNS resolver (split-horizon; internal authoritative for your zones)     ║
+║   • Reverse proxy (public + internal routing)                                       ║
+║   • DHCP on TRUST/GUEST/IoT (per your ranges)                                       ║
+╚════════════════════════════════════════════════════════════════════════════════════╝
+                                                │
+     ┌──────────────────────────────────────────┼──────────────────────────────────────────┐
+     │                                          │                                          │
+
+┌────┴─────────────────┐              ┌─────────┴────────────────────┐          ┌──────────┴──────────┐
+│ LAN (192.168.1.0/24) │              │ CORE10 (10.10.0.0/24)         │          │ AP_MGMT (10.99/24)  │
+│ Admin access only     │              │ High-trust compute/storage    │          │ AP management only  │
+│                       │              │ “Inside the vault”            │          │ (attack surface)    │
+│ Admin PC:             │              │                                │          │                     │
+│ 192.168.1.105         │              │  Sentinel (Proxmox)            │          │ Flint AP: 10.99.0.2 │
+│                       │              │   CORE10: 10.10.0.20           │          │  Trunks VLANs:      │
+│ Purpose:              │              │   WG:    10.10.200.20          │          │   20 TRUST          │
+│ • human administration│              │   IPMI:  10.98.0.20            │          │   30 GUEST          │
+│ • firewall mgmt       │              │   LACP trunk to OPNsense        │          │   60 IoT            │
+└───────────────────────┘              │                                │          │   99 AP_MGMT        │
+                                       │  Atlas Arx (TrueNAS)           │          │                     │
+                                       │   CORE10: 10.10.0.50           │          │ Invariant:          │
+                                       │   WG:    10.10.200.50          │          │  • AP management     │
+                                       │   IPMI:  10.98.0.50            │          │    reachable ONLY    │
+                                       │                                │          │    from MGMT_SOURCES │
+                                       │  Heartbeat (Bitcoin node)      │          │  • Deny from TRUST/  │
+                                       │   CORE10: 10.10.0.70           │          │    GUEST/IoT and     │
+                                       │   WG:    10.10.200.70          │          │    from VLANs it     │
+                                       │   IPMI:  NONE  (correct)       │          │    trunks            │
+                                       │                                │          └─────────────────────┘
+                                       │  VMs on Sentinel:              │
+                                       │    Talos-01 VM (K8s prod)      │
+                                       │      10.10.0.31  (CORE10)      │
+                                       │      10.40.0.31  (CORE_SVC)    │
+                                       │      (No IoT interface)        │
+                                       │                                │
+                                       │    Dev VM (sandbox)            │
+                                       │      10.10.0.90  (CORE10 only) │
+                                       │      No prod creds             │
+                                       │                                │
+                                       │ Optional hardening (later):    │
+                                       │  • CORE10 egress allowlisting  │
+                                       │    for trading/execution hosts │
+                                       │  • Start with logging, then    │
+                                       │    restrict to specific APIs   │
+                                       └────────────────────────────────┘
+
+
+┌────────────────────────────────────────────────────────────────────────────────────┐
+│ TRUST (10.20.0.0/24) — Trusted Wi-Fi Clients                                        │
+│                                                                                    │
+│ DHCP: 10.20.0.100–200                                                               │
+│                                                                                    │
+│ Allowed flows (typical):                                                           │
+│  • TRUST → CORE_SVC VIPs: 443 (web apps via ingress)                                │
+│  • TRUST → IoT: 8123 only (HomeAssistant)                                           │
+│  • TRUST → Heartbeat: 443 only (mempool via proxy)                                  │
+│  • TRUST → This Firewall: 53/123 (DNS/NTP)                                          │
+│                                                                                    │
+│ Denied:                                                                             │
+│  • TRUST → CORE10 hosts (except via explicit mgmt if ever needed)                   │
+│  • TRUST → AP_MGMT / IPMI                                                           │
+└────────────────────────────────────────────────────────────────────────────────────┘
+
+
+┌────────────────────────────────────────────────────────────────────────────────────┐
+│ GUEST (10.30.0.0/24) — Internet Only                                                │
+│                                                                                    │
+│ DHCP: 10.30.0.100–200                                                               │
+│                                                                                    │
+│ Allowed:                                                                            │
+│  • GUEST → This Firewall: 53/67/123 (DNS/DHCP/NTP)                                  │
+│  • GUEST → Internet: *                                                             │
+│                                                                                    │
+│ Denied:                                                                             │
+│  • GUEST → RFC1918 (LAN/CORE10/TRUST/CORE_SVC/IoT/IPMI/AP_MGMT/WG)                   │
+└────────────────────────────────────────────────────────────────────────────────────┘
+
+
+┌────────────────────────────────────────────────────────────────────────────────────┐
+│ IoT (10.60.0.0/24) — Low Trust Devices                                              │
+│                                                                                    │
+│ DHCP: 10.60.0.100–200                                                               │
+│                                                                                    │
+│ Allowed:                                                                            │
+│  • IoT → This Firewall: 53/123 (DNS/NTP)                                            │
+│  • IoT → Internet: *                                                               │
+│  • IoT → HA (explicit only): 8123 (if HA exists on IoT VLAN)                        │
+│  • IoT → MQTT (explicit only): 1883 (if/when you add a broker)                      │
+│                                                                                    │
+│ Default:                                                                            │
+│  • IoT → IoT lateral: DENY (add explicit exceptions later)                          │
+│                                                                                    │
+│ Exception workflow (recommended):                                                   │
+│  1) Create alias group for specific IoT devices (sources)                           │
+│  2) Create alias for target service host (HA/MQTT/etc.)                              │
+│  3) Add explicit allow rules per service/port (host pairs, not IoT-wide)            │
+│                                                                                    │
+│ Note on HomeAssistant placement:                                                    │
+│  • Preferred: run HA as an IoT-local host/VM/device                                 │
+│  • Avoid giving Talos nodes an IoT interface unless intentionally accepted           │
+└────────────────────────────────────────────────────────────────────────────────────┘
+
+
+┌────────────────────────────────────────────────────────────────────────────────────┐
+│ CORE_SVC (10.40.0.0/24) — Service VIP Address Space (not a trust tier)             │
+│                                                                                    │
+│ Purpose: stable service entrypoints for k8s-exposed services                         │
+│ Workloads run on Talos/CORE10; VIPs live here via MetalLB                            │
+│                                                                                    │
+│ MetalLB pool: 10.40.0.20–10.40.0.49                                                 │
+│ VIPs (examples):                                                                     │
+│  • 10.40.0.20  internal ingress (grafana/prometheus routed here)                    │
+│  • 10.40.0.21  NATS                                                                 │
+│  • 10.40.0.22  Redpanda                                                             │
+│                                                                                    │
+│ NOTE: CORE_SVC is VIP address space, not a trust tier.                              │
+│  • TRUST → CORE_SVC: HTTPS (443) only                                               │
+│  • CORE10 → CORE_SVC: explicit service ports only (bus/metrics/etc.)                │
+└────────────────────────────────────────────────────────────────────────────────────┘
+
+
+┌────────────────────────────────────────────────────────────────────────────────────┐
+│ WG_CORE (10.10.200.0/24) — WireGuard Overlay (control-plane only)                   │
+│                                                                                    │
+│ Philosophy: narrow, authenticated tunnels; not a second LAN                          │
+│                                                                                    │
+│ Examples:                                                                            │
+│  • Bitcoin RPC locked to WG only                                                     │
+│  • Targeted SSH from WG_ADMIN_HOSTS → WG_SSH_TARGETS (Pattern B)                    │
+│                                                                                    │
+│ Key rules:                                                                           │
+│  • NO blanket WG → CORE10                                                            │
+│  • Only explicit peer+port allows                                                    │
+└────────────────────────────────────────────────────────────────────────────────────┘
+
+
+┌────────────────────────────────────────────────────────────────────────────────────┐
+│ IPMI (10.98.0.0/24) — Out-of-Band Management (BMC)                                  │
+│                                                                                    │
+│ Devices with IPMI ONLY:                                                              │
+│  • OPNsense  → 10.98.0.1                                                             │
+│  • Sentinel  → 10.98.0.20                                                            │
+│  • Atlas Arx → 10.98.0.50                                                            │
+│                                                                                    │
+│ Explicitly NOT present on: Heartbeat / Flint / VMs / IoT                             │
+│                                                                                    │
+│ Access:                                                                              │
+│  • MGMT_SOURCES only → ports 443, 623                                                │
+│  • Deny all else                                                                     │
+└────────────────────────────────────────────────────────────────────────────────────┘
+
+
+┌────────────────────────────────────────────────────────────────────────────────────┐
+│ DNS + Naming Convention (Operational Contract)                                      │
+│                                                                                    │
+│ As you deploy NATS / Redpanda / observability, keep this convention:                │
+│                                                                                    │
+│  Users browse to:                                                                   │
+│    *.svc.xuercapital.com                                                            │
+│    → CORE_SVC VIPs via ingress (HTTPS only)                                         │
+│                                                                                    │
+│  Admins manage hosts via:                                                           │
+│    *.infra.xuercapital.com                                                          │
+│    → CORE10 host IPs (admin ports only)                                             │
+│                                                                                    │
+│  Sensitive control (RPC / SSH) uses:                                                │
+│    *.wg.xuercapital.com                                                             │
+│    → WireGuard overlay only (explicit peer+port allows)                             │
+└────────────────────────────────────────────────────────────────────────────────────┘
+
+
+┌────────────────────────────────────────────────────────────────────────────────────┐
+│ Heartbeat (Bitcoin) — Service Exposure Summary                                      │
+│                                                                                    │
+│ Internet-facing:                                                                     │
+│  • P2P 8333 (public peers)                                                          │
+│                                                                                    │
+│ WG-only (sensitive control):                                                        │
+│  • RPC 8332 bound to 10.10.200.70 (allowed only from WG_RPC_CLIENTS)                │
+│                                                                                    │
+│ CORE10 (internal consumers):                                                        │
+│  • ZMQ blocks 28332, ZMQ tx 28333                                                   │
+│  • Electrs/Fulcrum 50001/50002                                                      │
+│                                                                                    │
+│ TRUST via proxy only:                                                               │
+│  • mempool UI 443                                                                   │
+└────────────────────────────────────────────────────────────────────────────────────┘
