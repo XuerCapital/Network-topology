@@ -1,0 +1,71 @@
+                         ┌──────────────────────────────┐
+                         │           Internet           │
+                         │   (Untrusted / Hostile)      │
+                         └──────────────┬───────────────┘
+                                        │
+                               ┌────────▼────────┐
+                               │     OPNsense     │
+                               │  (Policy Gate)  │
+                               └────────┬────────┘
+                                        │
+     ┌──────────────────────────────────┼──────────────────────────────────┐
+     │                                  │                                  │
+┌────▼────┐                       ┌─────▼─────┐                     ┌─────▼─────┐
+│  GUEST  │                       │   TRUST    │                     │    IoT    │
+│  VLAN   │                       │  Clients   │                     │  Devices  │
+│  No     │                       │  (Wi-Fi)   │                     │  Low-Trust │
+│  Trust  │                       └─────┬─────┘                     └─────┬─────┘
+└────┬────┘                             │                                   │
+     │                           HTTPS only                                  │
+     │                             (443)                                     │
+     │                                  │                                   │
+     │                     ┌────────────▼────────────┐                     │
+     │                     │        CORE_SVC          │                     │
+     │                     │  Service VIP Address     │                     │
+     │                     │  Space (MetalLB)         │                     │
+     │                     │  ❌ Not a trust tier     │                     │
+     │                     └────────────┬────────────┘                     │
+     │                                  │                                   │
+     │                    Explicit service ports                            │
+     │                   (bus, metrics, APIs)                               │
+     │                                  │                                   │
+┌────▼──────────────────────────────────▼───────────────────────────────────▼────┐
+│                                    CORE10                                         │
+│                         Core Compute & Storage (Highest Trust)                    │
+│                                                                                    │
+│  • Proxmox (Sentinel)                                                              │
+│  • TrueNAS (Atlas Arx)                                                             │
+│  • Talos / Kubernetes                                                              │
+│  • Bitcoin node (Heartbeat)                                                        │
+│                                                                                    │
+│  Default:                                                                          │
+│    • Allow east-west                                                               │
+│    • No implicit internet egress                                                   │
+│    • Admin access via infra.*                                                      │
+└──────────────────────────────────┬───────────────────────────────────────────────┘
+                                   │
+                         Encrypted / Explicit Only
+                                   │
+                     ┌─────────────▼─────────────┐
+                     │          WG_CORE           │
+                     │     WireGuard Overlay      │
+                     │  (Narrow Control Plane)    │
+                     │                             │
+                     │  • Bitcoin RPC              │
+                     │  • Targeted SSH
+                     │  ❌ No blanket access       │
+                     └─────────────┬─────────────┘
+                                   │
+                        Explicit Host + Port
+                                   │
+        ┌──────────────────────────▼──────────────────────────┐
+        │                        IPMI                           │
+        │              Out-of-Band Hardware Control             │
+        │                                                        │
+        │  • OPNsense                                           │
+        │  • Proxmox (Sentinel)                                 │
+        │  • TrueNAS (Atlas Arx)                                │
+        │                                                        │
+        │  Access: MGMT_SOURCES only                             │
+        │  (Break-glass tier)                                   │
+        └───────────────────────────────────────────────────────┘
